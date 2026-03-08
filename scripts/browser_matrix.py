@@ -19,6 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from loadtest.config import TargetConfig, load_test_config
 from loadtest.devices import DEFAULT_BROWSER_MATRIX_DEVICES
+from loadtest.playwright_install import ensure_playwright_browsers
 
 
 @dataclass
@@ -201,6 +202,11 @@ def write_json(path: str | Path, results: Iterable[CheckResult]) -> None:
 
 def main() -> None:
     args = parse_args()
+    ok, message = ensure_playwright_browsers(args.browsers, install_missing=True)
+    if not ok:
+        raise SystemExit(message)
+    if message and "installed" in message.lower():
+        print(message)
     results = asyncio.run(run_checks(args))
     write_json(args.output_json, results)
     print_summary(results)

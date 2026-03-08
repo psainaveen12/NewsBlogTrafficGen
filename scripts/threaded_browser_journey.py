@@ -23,6 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from loadtest.config import ConfigError, TestConfig, TrafficProfile, load_test_config
+from loadtest.playwright_install import ensure_playwright_browsers
 from loadtest.user_agents import TOP_25_USER_AGENTS
 
 
@@ -988,13 +989,12 @@ class ThreadMetricsCollector:
         tmp.replace(self.output_path)
 
 
-def ensure_playwright_installed() -> None:
-    try:
-        import playwright.sync_api  # noqa: F401
-    except ModuleNotFoundError as exc:
-        raise SystemExit(
-            "Playwright is not installed. Run: pip install -r requirements.txt && playwright install"
-        ) from exc
+def ensure_playwright_installed(browser_name: str) -> None:
+    ok, message = ensure_playwright_browsers([browser_name], install_missing=True)
+    if not ok:
+        raise SystemExit(message)
+    if message and "installed" in message.lower():
+        logging.info(message)
 
 
 def parse_args() -> RunnerArgs:
@@ -1671,7 +1671,7 @@ def main() -> None:
     )
 
     args = parse_args()
-    ensure_playwright_installed()
+    ensure_playwright_installed(args.browser)
     try:
         config = load_test_config(args.config)
     except ConfigError as exc:

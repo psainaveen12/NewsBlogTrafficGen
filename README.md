@@ -225,3 +225,4 @@ Notes:
 - If `config/sites.yaml` is missing, the app auto-falls back to `config/sites.example.yaml`.
 - Saving config from the dashboard will create/update `config/sites.yaml` at runtime.
 - For heavy runners (Locust/Playwright), keep profiles conservative on Community Cloud.
+- Playwright binaries are auto-bootstrapped on first Threaded Journey / Browser Matrix run.
