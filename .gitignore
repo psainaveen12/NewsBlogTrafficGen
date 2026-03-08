@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+.pytest_cache/
+results/
+results/*.log
+results/dashboard_runtime.json
+config/sites.yaml
+.ipynb_checkpoints/
+playwright-report/

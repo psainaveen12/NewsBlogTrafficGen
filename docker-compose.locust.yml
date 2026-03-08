@@ -1,0 +1,39 @@
+version: "3.9"
+
+services:
+  master:
+    build:
+      context: .
+      dockerfile: Dockerfile.locust
+    command:
+      [
+        "--master",
+        "--host",
+        "https://localhost",
+        "--web-host",
+        "0.0.0.0",
+        "--web-port",
+        "8089",
+      ]
+    environment:
+      LOAD_TEST_CONFIG: config/sites.yaml
+    ports:
+      - "8089:8089"
+      - "5557:5557"
+    volumes:
+      - ./:/app
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.locust
+    command: ["--worker", "--master-host", "master"]
+    environment:
+      LOAD_TEST_CONFIG: config/sites.yaml
+    volumes:
+      - ./:/app
+    depends_on:
+      - master
+    deploy:
+      replicas: 3
+

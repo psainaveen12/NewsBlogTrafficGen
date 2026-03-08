@@ -1,0 +1,14 @@
+{
+  "com_threads": 5,
+  "com_browser": "chromium",
+  "com_cycle_limit": 3,
+  "com_nav_timeout": 45.0,
+  "com_headed": false,
+  "com_metrics_output": "results/comment_journey_metrics.json",
+  "com_metrics_flush": 2.0,
+  "com_min_wait_seconds": 5.0,
+  "com_max_wait_seconds": 10.0,
+  "com_comment_profile_mode": "anonymous",
+  "com_comment_names_file": "config/1000_random_names.txt",
+  "com_comments_file": "config/comments_10000.txt"
+}

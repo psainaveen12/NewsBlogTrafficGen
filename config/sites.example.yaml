@@ -1,0 +1,60 @@
+# Set this to true only when you own the targets or have written permission.
+owner_authorization: false
+
+load_profile:
+  wait_time_seconds:
+    min: 0.5
+    max: 2.5
+  request_timeout_seconds: 25
+  switch_target_probability: 0.2
+  ssl_verify: true
+
+headers_pool:
+  accept_language:
+    - en-US,en;q=0.9
+    - en-GB,en;q=0.9
+    - en-IN,en;q=0.8
+  cache_control:
+    - no-cache
+    - max-age=0
+
+# For full 25-profile pool, use:
+# python scripts/import_urls_to_config.py --input "/path/to/urls.txt" --output config/sites.yaml
+traffic_profiles:
+  - name: desktop_chrome_windows
+    weight: 40
+    user_agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36
+  - name: desktop_safari_macos
+    weight: 18
+    user_agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.4 Safari/605.1.15
+  - name: mobile_safari_ios
+    weight: 22
+    user_agent: Mozilla/5.0 (iPhone; CPU iPhone OS 18_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.4 Mobile/15E148 Safari/604.1
+  - name: mobile_chrome_android
+    weight: 20
+    user_agent: Mozilla/5.0 (Linux; Android 15; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Mobile Safari/537.36
+
+targets:
+  - name: ieltstask_main
+    base_url: https://www.ieltstask.com
+    weight: 5
+    paths:
+      - /
+      - /ielts-writing-task-1
+      - /ielts-writing-task-2
+      - /blog
+    query_paths:
+      - /?s=ielts
+      - /?s=task+1
+    healthcheck_path: /robots.txt
+
+  # Add your additional approved sites here
+  # - name: another_site
+  #   base_url: https://example.com
+  #   weight: 2
+  #   paths:
+  #     - /
+  #     - /pricing
+  #   query_paths:
+  #     - /?s=keyword
+  #   healthcheck_path: /robots.txt

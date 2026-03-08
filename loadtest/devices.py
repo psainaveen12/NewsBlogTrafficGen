@@ -1,0 +1,36 @@
+from __future__ import annotations
+
+
+DEFAULT_BROWSER_MATRIX_DEVICES = [
+    "Desktop Chrome",
+    "Desktop Chrome HiDPI",
+    "Desktop Edge",
+    "Desktop Firefox",
+    "Desktop Safari",
+    "Desktop Safari HiDPI",
+    "iPhone 13",
+    "iPhone 13 Pro",
+    "iPhone 13 Pro Max",
+    "iPhone 12",
+    "iPhone 12 Pro",
+    "iPhone 11",
+    "iPhone 11 Pro",
+    "iPhone XR",
+    "iPhone X",
+    "iPhone 8",
+    "iPhone 8 Plus",
+    "iPhone SE",
+    "iPad (gen 7)",
+    "iPad Mini",
+    "iPad Pro 11",
+    "Pixel 5",
+    "Pixel 4a (5G)",
+    "Pixel 4",
+    "Pixel 2",
+    "Galaxy S8",
+    "Galaxy S9+",
+    "Galaxy Note 3",
+    "Nexus 10",
+    "Nexus 7",
+]
+

@@ -1,0 +1,23 @@
+{
+  "thr_threads": 10,
+  "thr_browser": "chromium",
+  "thr_min_clicks": 3,
+  "thr_max_clicks": 5,
+  "thr_cycle_limit": 0,
+  "thr_nav_timeout": 45.0,
+  "thr_headed": false,
+  "thr_metrics_output": "results/threaded_journey_metrics.json",
+  "thr_metrics_flush": 2.0,
+  "thr_min_page_browse": 5.0,
+  "thr_max_page_browse": 10.0,
+  "thr_min_scroll": 3.0,
+  "thr_max_scroll": 5.0,
+  "thr_min_scroll_pause": 1.0,
+  "thr_max_scroll_pause": 3.0,
+  "thr_min_post_scroll_delay": 2.0,
+  "thr_max_post_scroll_delay": 5.0,
+  "thr_min_site_browse": 0.0,
+  "thr_max_site_browse": 0.0,
+  "thr_scroll_step": 700,
+  "thr_disable_scroll": false
+}
