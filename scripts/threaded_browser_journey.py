@@ -1011,8 +1011,16 @@ class ThreadMetricsCollector:
         tmp.replace(self.output_path)
 
 
-def ensure_playwright_installed(browser_name: str) -> None:
-    ok, message = ensure_playwright_browsers([browser_name], install_missing=True)
+def ensure_playwright_installed(browser_names: str | list[str]) -> None:
+    if isinstance(browser_names, str):
+        requested = [browser_names]
+    else:
+        requested = [str(name).strip().lower() for name in browser_names if str(name).strip()]
+
+    if not requested:
+        return
+
+    ok, message = ensure_playwright_browsers(requested, install_missing=True)
     if not ok:
         raise SystemExit(message)
     if message and "installed" in message.lower():
@@ -1258,8 +1266,36 @@ def select_internal_links(page_url: str, hrefs: list[str], max_links: int, rng: 
     return selected[:max_links]
 
 
-def choose_traffic_profile(rng: random.Random, configured_profiles: list[TrafficProfile]) -> TrafficProfile:
+def profile_matches_browser(profile_name: str, browser_name: str) -> bool:
+    lowered = profile_name.strip().lower()
+    browser = browser_name.strip().lower()
+
+    if not lowered:
+        return True
+
+    if browser == "chromium":
+        if "firefox" in lowered or "safari" in lowered:
+            return False
+        return any(token in lowered for token in ("chrome", "edge", "opera", "samsung", "chromium"))
+
+    if browser == "firefox":
+        return "firefox" in lowered
+
+    if browser == "webkit":
+        return "safari" in lowered or "ios" in lowered or "ipad" in lowered
+
+    return True
+
+
+def choose_traffic_profile(
+    rng: random.Random,
+    configured_profiles: list[TrafficProfile],
+    browser_name: str,
+) -> TrafficProfile:
     profile_pool = configured_profiles if len(configured_profiles) >= 25 else TOP_25_USER_AGENTS
+    browser_matched = [profile for profile in profile_pool if profile_matches_browser(profile.name, browser_name)]
+    if browser_matched:
+        profile_pool = browser_matched
     weights = [max(1, profile.weight) for profile in profile_pool]
     return rng.choices(profile_pool, weights=weights, k=1)[0]
 
@@ -1602,10 +1638,10 @@ def worker_main(
     metrics.mark_worker_started(worker_id)
 
     managed_runtime = running_in_managed_runtime()
+    managed_runtime_chromium_fallback = managed_runtime and args.browser == "chromium" and not comment_engine.enabled
     recycle_after_cycles = (
         MANAGED_RUNTIME_BROWSER_RECYCLE_CYCLES if managed_runtime and args.browser == "chromium" else 0
     )
-    blocked_resource_types = {"image", "media", "font"}
     crash_markers = (
         "page crashed",
         "target crashed",
@@ -1619,6 +1655,16 @@ def worker_main(
     def _is_crash_error(message: str) -> bool:
         lowered = message.lower()
         return any(marker in lowered for marker in crash_markers)
+
+    def _is_lightweight_mode(current_browser: str) -> bool:
+        return managed_runtime and current_browser == "chromium" and not comment_engine.enabled
+
+    def _blocked_resource_types(current_browser: str) -> set[str]:
+        if _is_lightweight_mode(current_browser):
+            return {"image", "media", "font", "script", "stylesheet", "xhr", "fetch", "websocket", "eventsource"}
+        if managed_runtime and current_browser == "chromium":
+            return {"image", "media", "font"}
+        return set()
 
     def _safe_close_context(context_obj, seed_url: str) -> None:
         if context_obj is None:
@@ -1665,30 +1711,38 @@ def worker_main(
         wait_seconds = min(max_seconds, wait_seconds)
         return wait_seconds + rng.uniform(0.05, 0.85)
 
-    def _new_context(browser_obj, profile: TrafficProfile, accept_language_value: str):
+    def _new_context(
+        browser_obj,
+        profile: TrafficProfile,
+        accept_language_value: str,
+        current_browser: str,
+    ):
         context_kwargs = {
             "user_agent": profile.user_agent,
             "ignore_https_errors": not config.load_profile.ssl_verify,
             "locale": accept_language_value.split(",")[0],
             "extra_http_headers": {"Accept-Language": accept_language_value},
         }
-        if managed_runtime and args.browser == "chromium":
+        if managed_runtime and current_browser == "chromium":
             context_kwargs.update(
                 {
-                    "viewport": {"width": 1366, "height": 768},
+                    "viewport": {"width": 1280, "height": 720},
                     "device_scale_factor": 1,
                     "reduced_motion": "reduce",
                     "service_workers": "block",
                 }
             )
+            if _is_lightweight_mode(current_browser):
+                context_kwargs["java_script_enabled"] = False
 
         context_obj = browser_obj.new_context(**context_kwargs)
 
-        if managed_runtime and args.browser == "chromium":
+        blocked_types = _blocked_resource_types(current_browser)
+        if blocked_types:
 
             def _route_handler(route) -> None:
                 try:
-                    if route.request.resource_type in blocked_resource_types:
+                    if route.request.resource_type in blocked_types:
                         route.abort()
                     else:
                         route.continue_()
@@ -1709,8 +1763,11 @@ def worker_main(
 
     try:
         with sync_playwright() as playwright:
-            browser_type = getattr(playwright, args.browser)
-            launch_kwargs = browser_launch_kwargs(args.browser, headless=args.headless)
+            active_browser_name = args.browser
+            browser_type = getattr(playwright, active_browser_name)
+            launch_kwargs = browser_launch_kwargs(active_browser_name, headless=args.headless)
+            fallback_browser_name = "firefox" if managed_runtime_chromium_fallback else None
+            fallback_activated = False
 
             while not stop_event.is_set():
                 if args.max_cycles_per_thread and cycles >= args.max_cycles_per_thread:
@@ -1720,7 +1777,7 @@ def worker_main(
                     try:
                         browser = browser_type.launch(**launch_kwargs)
                         cycles_since_browser_launch = 0
-                        logging.info("Worker %d launched %s browser process", worker_id, args.browser)
+                        logging.info("Worker %d launched %s browser process", worker_id, active_browser_name)
                     except PlaywrightError as exc:
                         message = str(exc)
                         consecutive_errors += 1
@@ -1744,20 +1801,21 @@ def worker_main(
                     continue
 
                 seed_url = allocator.acquire(rng)
-                profile = choose_traffic_profile(rng, config.traffic_profiles)
+                profile = choose_traffic_profile(rng, config.traffic_profiles, active_browser_name)
                 accept_language = rng.choice(config.headers_pool.accept_language)
                 context = None
                 cycle_success = False
                 crash_like_error = False
 
                 try:
-                    context = _new_context(browser, profile, accept_language)
+                    context = _new_context(browser, profile, accept_language, active_browser_name)
                     page = context.new_page()
                     logging.info(
-                        "Cycle %d start | seed=%s | ua=%s",
+                        "Cycle %d start | seed=%s | ua=%s | engine=%s",
                         cycles + 1,
                         seed_url,
                         profile.name,
+                        active_browser_name,
                     )
                     run_journey_cycle(
                         page=page,
@@ -1810,6 +1868,27 @@ def worker_main(
                     browser = None
                     cycles_since_browser_launch = 0
 
+                if (
+                    crash_like_error
+                    and consecutive_crashes >= 3
+                    and fallback_browser_name
+                    and not fallback_activated
+                    and active_browser_name != fallback_browser_name
+                ):
+                    logging.warning(
+                        "Worker %d switching browser from %s to %s after %d consecutive crashes",
+                        worker_id,
+                        active_browser_name,
+                        fallback_browser_name,
+                        consecutive_crashes,
+                    )
+                    active_browser_name = fallback_browser_name
+                    browser_type = getattr(playwright, active_browser_name)
+                    launch_kwargs = browser_launch_kwargs(active_browser_name, headless=args.headless)
+                    fallback_activated = True
+                    consecutive_errors = 0
+                    consecutive_crashes = 0
+
                 backoff = _compute_backoff_seconds(consecutive_errors, crash_like=crash_like_error)
                 slept = sleep_interruptible(backoff, stop_event)
                 if slept > 0:
@@ -1852,7 +1931,10 @@ def main() -> None:
             MANAGED_RUNTIME_THREAD_CAP,
         )
         args.threads = MANAGED_RUNTIME_THREAD_CAP
-    ensure_playwright_installed(args.browser)
+    bootstrap_browsers = [args.browser]
+    if running_in_managed_runtime() and args.browser == "chromium":
+        bootstrap_browsers.append("firefox")
+    ensure_playwright_installed(bootstrap_browsers)
     try:
         config = load_test_config(args.config)
     except ConfigError as exc:

@@ -530,7 +530,7 @@ def render_threaded_runner_control(statuses: dict[str, dict[str, Any]]) -> None:
             st.session_state["thr_threads"] = clamped_threads_value
         threads = st.number_input("Threads", min_value=1, max_value=thread_cap, value=clamped_threads_value, step=1, key="thr_threads")
         if cloud_mode:
-            st.warning("Streamlit Cloud detected: threads are capped at 2 to reduce Chromium page crashes.")
+            st.warning("Streamlit Cloud detected: threads are capped at 2. If Chromium keeps crashing, runner auto-falls back to Firefox.")
         browser_options = ["chromium", "firefox", "webkit"]
         browser_saved = str(_state_or_saved("thr_browser"))
         browser_index = browser_options.index(browser_saved) if browser_saved in browser_options else 0
