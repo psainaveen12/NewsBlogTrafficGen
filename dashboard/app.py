@@ -487,6 +487,17 @@ def render_config_studio() -> None:
         st.warning(f"Unable to render target inspector: {exc}")
 
 
+def is_streamlit_cloud_runtime() -> bool:
+    if os.environ.get("STREAMLIT_SHARING_MODE"):
+        return True
+    if os.environ.get("STREAMLIT_CLOUD"):
+        return True
+    if str(PROJECT_ROOT).startswith("/mount/src/"):
+        return True
+    home = os.environ.get("HOME", "")
+    return home.startswith("/home/appuser") or home.startswith("/home/adminuser")
+
+
 def _clamp_number_input_state(key: str, minimum: float) -> None:
     current = st.session_state.get(key)
     if current is None:
@@ -511,7 +522,15 @@ def render_threaded_runner_control(statuses: dict[str, dict[str, Any]]) -> None:
 
     core_col, behavior_col = st.columns(2)
     with core_col:
-        threads = st.number_input("Threads", min_value=1, max_value=200, value=int(_state_or_saved("thr_threads")), step=1, key="thr_threads")
+        cloud_mode = is_streamlit_cloud_runtime()
+        thread_cap = 3 if cloud_mode else 200
+        raw_threads_value = int(_state_or_saved("thr_threads"))
+        clamped_threads_value = max(1, min(thread_cap, raw_threads_value))
+        if clamped_threads_value != raw_threads_value:
+            st.session_state["thr_threads"] = clamped_threads_value
+        threads = st.number_input("Threads", min_value=1, max_value=thread_cap, value=clamped_threads_value, step=1, key="thr_threads")
+        if cloud_mode:
+            st.warning("Streamlit Cloud detected: threads are capped at 3 to reduce Chromium page crashes.")
         browser_options = ["chromium", "firefox", "webkit"]
         browser_saved = str(_state_or_saved("thr_browser"))
         browser_index = browser_options.index(browser_saved) if browser_saved in browser_options else 0

@@ -89,3 +89,16 @@ def ensure_playwright_browsers(
         )
 
     return True, "Installed missing Playwright browsers: " + ", ".join(missing)
+
+def browser_launch_kwargs(browser_name: str, headless: bool) -> dict[str, object]:
+    kwargs: dict[str, object] = {"headless": bool(headless)}
+    if browser_name == "chromium":
+        kwargs["args"] = [
+            "--disable-dev-shm-usage",
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-gpu",
+            "--disable-features=SitePerProcess",
+        ]
+    return kwargs
+

@@ -19,7 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from loadtest.config import TargetConfig, load_test_config
 from loadtest.devices import DEFAULT_BROWSER_MATRIX_DEVICES
-from loadtest.playwright_install import ensure_playwright_browsers
+from loadtest.playwright_install import browser_launch_kwargs, ensure_playwright_browsers
 
 
 @dataclass
@@ -91,7 +91,8 @@ async def check_url(
 
     start = perf_counter()
     try:
-        browser = await browser_type.launch(headless=True)
+        launch_kwargs = browser_launch_kwargs(browser_name, headless=True)
+        browser = await browser_type.launch(**launch_kwargs)
         context = await browser.new_context(**device)
         page = await context.new_page()
         response = await page.goto(url, wait_until="domcontentloaded", timeout=45000)

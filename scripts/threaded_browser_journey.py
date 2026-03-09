@@ -5,6 +5,7 @@ import argparse
 import csv
 import json
 import logging
+import os
 import random
 import re
 import signal
@@ -23,8 +24,22 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from loadtest.config import ConfigError, TestConfig, TrafficProfile, load_test_config
-from loadtest.playwright_install import ensure_playwright_browsers
+from loadtest.playwright_install import browser_launch_kwargs, ensure_playwright_browsers
 from loadtest.user_agents import TOP_25_USER_AGENTS
+
+
+MANAGED_RUNTIME_THREAD_CAP = 3
+
+
+def running_in_managed_runtime() -> bool:
+    if os.environ.get("STREAMLIT_SHARING_MODE"):
+        return True
+    if os.environ.get("STREAMLIT_CLOUD"):
+        return True
+    if str(PROJECT_ROOT).startswith("/mount/src/"):
+        return True
+    home = os.environ.get("HOME", "")
+    return home.startswith("/home/appuser") or home.startswith("/home/adminuser")
 
 
 def utc_now_iso() -> str:
@@ -1582,7 +1597,8 @@ def worker_main(
     try:
         with sync_playwright() as playwright:
             browser_type = getattr(playwright, args.browser)
-            browser = browser_type.launch(headless=args.headless)
+            launch_kwargs = browser_launch_kwargs(args.browser, headless=args.headless)
+            browser = browser_type.launch(**launch_kwargs)
             try:
                 while not stop_event.is_set():
                     if args.max_cycles_per_thread and cycles >= args.max_cycles_per_thread:
@@ -1671,6 +1687,13 @@ def main() -> None:
     )
 
     args = parse_args()
+    if running_in_managed_runtime() and args.threads > MANAGED_RUNTIME_THREAD_CAP:
+        logging.warning(
+            "Managed runtime detected. Capping threads from %d to %d for browser stability.",
+            args.threads,
+            MANAGED_RUNTIME_THREAD_CAP,
+        )
+        args.threads = MANAGED_RUNTIME_THREAD_CAP
     ensure_playwright_installed(args.browser)
     try:
         config = load_test_config(args.config)
