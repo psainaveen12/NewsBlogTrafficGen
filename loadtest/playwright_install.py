@@ -6,6 +6,29 @@ from pathlib import Path
 from typing import Iterable
 
 
+CHROMIUM_STABLE_ARGS: tuple[str, ...] = (
+    "--disable-dev-shm-usage",
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--no-zygote",
+    "--disable-gpu",
+    "--disable-breakpad",
+    "--disable-background-networking",
+    "--disable-background-timer-throttling",
+    "--disable-renderer-backgrounding",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-extensions",
+    "--disable-default-apps",
+    "--disable-component-extensions-with-background-pages",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--mute-audio",
+    "--renderer-process-limit=2",
+    "--blink-settings=imagesEnabled=false",
+    "--disable-features=SitePerProcess",
+)
+
+
 def _normalize_browsers(browser_names: Iterable[str]) -> list[str]:
     normalized: list[str] = []
     for name in browser_names:
@@ -90,15 +113,9 @@ def ensure_playwright_browsers(
 
     return True, "Installed missing Playwright browsers: " + ", ".join(missing)
 
+
 def browser_launch_kwargs(browser_name: str, headless: bool) -> dict[str, object]:
     kwargs: dict[str, object] = {"headless": bool(headless)}
     if browser_name == "chromium":
-        kwargs["args"] = [
-            "--disable-dev-shm-usage",
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-gpu",
-            "--disable-features=SitePerProcess",
-        ]
+        kwargs["args"] = list(CHROMIUM_STABLE_ARGS)
     return kwargs
-

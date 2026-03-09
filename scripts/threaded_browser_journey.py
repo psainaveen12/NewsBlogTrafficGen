@@ -28,7 +28,8 @@ from loadtest.playwright_install import browser_launch_kwargs, ensure_playwright
 from loadtest.user_agents import TOP_25_USER_AGENTS
 
 
-MANAGED_RUNTIME_THREAD_CAP = 3
+MANAGED_RUNTIME_THREAD_CAP = 2
+MANAGED_RUNTIME_BROWSER_RECYCLE_CYCLES = 18
 
 
 def running_in_managed_runtime() -> bool:
@@ -818,7 +819,13 @@ class ThreadMetricsCollector:
             row = self._threads[worker_id]
             if error_kind == "timeout":
                 row["timeouts"] += 1
-            elif error_kind == "playwright_error":
+            elif error_kind in {
+                "playwright_error",
+                "browser_crash",
+                "browser_launch_error",
+                "context_close_error",
+                "browser_close_error",
+            }:
                 row["playwright_errors"] += 1
             else:
                 row["unexpected_errors"] += 1
@@ -1594,82 +1601,233 @@ def worker_main(
     cycles = 0
     metrics.mark_worker_started(worker_id)
 
+    managed_runtime = running_in_managed_runtime()
+    recycle_after_cycles = (
+        MANAGED_RUNTIME_BROWSER_RECYCLE_CYCLES if managed_runtime and args.browser == "chromium" else 0
+    )
+    blocked_resource_types = {"image", "media", "font"}
+    crash_markers = (
+        "page crashed",
+        "target crashed",
+        "target closed",
+        "has been closed",
+        "browser has been closed",
+        "connection closed",
+        "session closed",
+    )
+
+    def _is_crash_error(message: str) -> bool:
+        lowered = message.lower()
+        return any(marker in lowered for marker in crash_markers)
+
+    def _safe_close_context(context_obj, seed_url: str) -> None:
+        if context_obj is None:
+            return
+        try:
+            context_obj.close()
+        except PlaywrightError as exc:
+            message = str(exc)
+            lowered = message.lower()
+            if "has been closed" in lowered or "target closed" in lowered:
+                logging.debug("Context already closed for %s", seed_url)
+            else:
+                metrics.record_error(worker_id, "context_close_error", message, url=seed_url)
+        except Exception as exc:  # noqa: BLE001
+            metrics.record_error(worker_id, "context_close_error", str(exc), url=seed_url)
+
+    def _safe_close_browser(browser_obj) -> None:
+        if browser_obj is None:
+            return
+        try:
+            browser_obj.close()
+        except PlaywrightError as exc:
+            message = str(exc)
+            lowered = message.lower()
+            if "has been closed" in lowered or "target closed" in lowered:
+                logging.debug("Browser already closed for worker %d", worker_id)
+            else:
+                metrics.record_error(worker_id, "browser_close_error", message)
+        except Exception as exc:  # noqa: BLE001
+            metrics.record_error(worker_id, "browser_close_error", str(exc))
+
+    def _compute_backoff_seconds(consecutive_errors: int, crash_like: bool) -> float:
+        if consecutive_errors <= 0:
+            return 0.0
+
+        base_seconds = 2.0 if crash_like else 1.2
+        max_seconds = 12.0
+        if managed_runtime:
+            base_seconds *= 1.4
+            max_seconds = 25.0
+
+        exponent = min(consecutive_errors, 6) - 1
+        wait_seconds = base_seconds * (2 ** max(0, exponent))
+        wait_seconds = min(max_seconds, wait_seconds)
+        return wait_seconds + rng.uniform(0.05, 0.85)
+
+    def _new_context(browser_obj, profile: TrafficProfile, accept_language_value: str):
+        context_kwargs = {
+            "user_agent": profile.user_agent,
+            "ignore_https_errors": not config.load_profile.ssl_verify,
+            "locale": accept_language_value.split(",")[0],
+            "extra_http_headers": {"Accept-Language": accept_language_value},
+        }
+        if managed_runtime and args.browser == "chromium":
+            context_kwargs.update(
+                {
+                    "viewport": {"width": 1366, "height": 768},
+                    "device_scale_factor": 1,
+                    "reduced_motion": "reduce",
+                    "service_workers": "block",
+                }
+            )
+
+        context_obj = browser_obj.new_context(**context_kwargs)
+
+        if managed_runtime and args.browser == "chromium":
+
+            def _route_handler(route) -> None:
+                try:
+                    if route.request.resource_type in blocked_resource_types:
+                        route.abort()
+                    else:
+                        route.continue_()
+                except Exception:  # noqa: BLE001
+                    try:
+                        route.continue_()
+                    except Exception:
+                        pass
+
+            context_obj.route("**/*", _route_handler)
+
+        return context_obj
+
+    consecutive_errors = 0
+    consecutive_crashes = 0
+    cycles_since_browser_launch = 0
+    browser = None
+
     try:
         with sync_playwright() as playwright:
             browser_type = getattr(playwright, args.browser)
             launch_kwargs = browser_launch_kwargs(args.browser, headless=args.headless)
-            browser = browser_type.launch(**launch_kwargs)
-            try:
-                while not stop_event.is_set():
-                    if args.max_cycles_per_thread and cycles >= args.max_cycles_per_thread:
-                        break
 
-                    seed_url = allocator.acquire(rng)
-                    profile = choose_traffic_profile(rng, config.traffic_profiles)
-                    accept_language = rng.choice(config.headers_pool.accept_language)
-                    context = None
+            while not stop_event.is_set():
+                if args.max_cycles_per_thread and cycles >= args.max_cycles_per_thread:
+                    break
 
+                if browser is None:
                     try:
-                        context = browser.new_context(
-                            user_agent=profile.user_agent,
-                            ignore_https_errors=not config.load_profile.ssl_verify,
-                            locale=accept_language.split(",")[0],
-                            extra_http_headers={"Accept-Language": accept_language},
-                        )
-                        page = context.new_page()
-                        logging.info(
-                            "Cycle %d start | seed=%s | ua=%s",
-                            cycles + 1,
-                            seed_url,
-                            profile.name,
-                        )
-                        run_journey_cycle(
-                            page=page,
-                            worker_id=worker_id,
-                            seed_url=seed_url,
-                            profile_name=profile.name,
-                            accept_language=accept_language,
-                            args=args,
-                            metrics=metrics,
-                            stop_event=stop_event,
-                            rng=rng,
-                            comment_engine=comment_engine,
-                        )
-                    except PlaywrightTimeoutError as exc:
-                        metrics.record_error(worker_id, "timeout", str(exc), url=seed_url)
-                        logging.warning("Navigation timeout on %s: %s", seed_url, exc)
+                        browser = browser_type.launch(**launch_kwargs)
+                        cycles_since_browser_launch = 0
+                        logging.info("Worker %d launched %s browser process", worker_id, args.browser)
                     except PlaywrightError as exc:
-                        metrics.record_error(worker_id, "playwright_error", str(exc), url=seed_url)
-                        logging.warning("Browser error on %s: %s", seed_url, exc)
-                    except Exception as exc:
-                        metrics.record_error(worker_id, "unexpected_error", str(exc), url=seed_url)
-                        logging.exception("Unexpected worker error on %s: %s", seed_url, exc)
-                    finally:
-                        if context is not None:
-                            try:
-                                context.close()
-                            except PlaywrightError as exc:
-                                message = str(exc)
-                                if "has been closed" in message.lower() or "target closed" in message.lower():
-                                    logging.debug("Context already closed for %s", seed_url)
-                                else:
-                                    metrics.record_error(worker_id, "context_close_error", message, url=seed_url)
-                            except Exception as exc:  # noqa: BLE001
-                                metrics.record_error(worker_id, "context_close_error", str(exc), url=seed_url)
-                        allocator.release(seed_url)
+                        message = str(exc)
+                        consecutive_errors += 1
+                        metrics.record_error(worker_id, "browser_launch_error", message)
+                        logging.warning("Worker %d failed to launch browser: %s", worker_id, message)
+                        backoff = _compute_backoff_seconds(consecutive_errors, crash_like=True)
+                        slept = sleep_interruptible(backoff, stop_event)
+                        if slept > 0:
+                            metrics.record_site_padding(worker_id=worker_id, seconds=slept)
+                        continue
 
-                    cycles += 1
-            finally:
+                if recycle_after_cycles and cycles_since_browser_launch >= recycle_after_cycles:
+                    logging.info(
+                        "Worker %d recycling browser process after %d cycles for memory stability",
+                        worker_id,
+                        cycles_since_browser_launch,
+                    )
+                    _safe_close_browser(browser)
+                    browser = None
+                    cycles_since_browser_launch = 0
+                    continue
+
+                seed_url = allocator.acquire(rng)
+                profile = choose_traffic_profile(rng, config.traffic_profiles)
+                accept_language = rng.choice(config.headers_pool.accept_language)
+                context = None
+                cycle_success = False
+                crash_like_error = False
+
                 try:
-                    browser.close()
+                    context = _new_context(browser, profile, accept_language)
+                    page = context.new_page()
+                    logging.info(
+                        "Cycle %d start | seed=%s | ua=%s",
+                        cycles + 1,
+                        seed_url,
+                        profile.name,
+                    )
+                    run_journey_cycle(
+                        page=page,
+                        worker_id=worker_id,
+                        seed_url=seed_url,
+                        profile_name=profile.name,
+                        accept_language=accept_language,
+                        args=args,
+                        metrics=metrics,
+                        stop_event=stop_event,
+                        rng=rng,
+                        comment_engine=comment_engine,
+                    )
+                    cycle_success = True
+                except PlaywrightTimeoutError as exc:
+                    consecutive_errors += 1
+                    metrics.record_error(worker_id, "timeout", str(exc), url=seed_url)
+                    logging.warning("Navigation timeout on %s: %s", seed_url, exc)
                 except PlaywrightError as exc:
                     message = str(exc)
-                    if "has been closed" in message.lower() or "target closed" in message.lower():
-                        logging.debug("Browser already closed for worker %d", worker_id)
+                    crash_like_error = _is_crash_error(message)
+                    consecutive_errors += 1
+                    if crash_like_error:
+                        consecutive_crashes += 1
+                        metrics.record_error(worker_id, "browser_crash", message, url=seed_url)
+                        logging.warning("Browser crash on %s: %s", seed_url, message)
                     else:
-                        metrics.record_error(worker_id, "browser_close_error", message)
-                except Exception as exc:  # noqa: BLE001
-                    metrics.record_error(worker_id, "browser_close_error", str(exc))
+                        consecutive_crashes = 0
+                        metrics.record_error(worker_id, "playwright_error", message, url=seed_url)
+                        logging.warning("Browser error on %s: %s", seed_url, message)
+                except Exception as exc:
+                    consecutive_errors += 1
+                    consecutive_crashes = 0
+                    metrics.record_error(worker_id, "unexpected_error", str(exc), url=seed_url)
+                    logging.exception("Unexpected worker error on %s: %s", seed_url, exc)
+                finally:
+                    _safe_close_context(context, seed_url)
+                    allocator.release(seed_url)
+
+                cycles += 1
+
+                if cycle_success:
+                    consecutive_errors = 0
+                    consecutive_crashes = 0
+                    cycles_since_browser_launch += 1
+                    continue
+
+                if crash_like_error or consecutive_crashes >= 2:
+                    _safe_close_browser(browser)
+                    browser = None
+                    cycles_since_browser_launch = 0
+
+                backoff = _compute_backoff_seconds(consecutive_errors, crash_like=crash_like_error)
+                slept = sleep_interruptible(backoff, stop_event)
+                if slept > 0:
+                    metrics.record_site_padding(worker_id=worker_id, seconds=slept)
+
+                if crash_like_error and consecutive_crashes >= 4 and not stop_event.is_set():
+                    cooldown_target = min(30.0, 6.0 + (consecutive_crashes * 1.5))
+                    logging.warning(
+                        "Worker %d entering crash cooldown for %.1fs after %d consecutive crashes",
+                        worker_id,
+                        cooldown_target,
+                        consecutive_crashes,
+                    )
+                    slept = sleep_interruptible(cooldown_target, stop_event)
+                    if slept > 0:
+                        metrics.record_site_padding(worker_id=worker_id, seconds=slept)
+
+            _safe_close_browser(browser)
     except Exception as exc:
         metrics.record_error(worker_id, "worker_fatal", str(exc))
         logging.exception("Worker %d stopped due to fatal error: %s", worker_id, exc)

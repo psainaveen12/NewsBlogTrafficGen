@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -35,6 +36,31 @@ class CheckResult:
 
 
 DEFAULT_DEVICES = list(DEFAULT_BROWSER_MATRIX_DEVICES)
+
+
+def running_in_managed_runtime() -> bool:
+    if os.environ.get("STREAMLIT_SHARING_MODE"):
+        return True
+    if os.environ.get("STREAMLIT_CLOUD"):
+        return True
+    if str(PROJECT_ROOT).startswith("/mount/src/"):
+        return True
+    home = os.environ.get("HOME", "")
+    return home.startswith("/home/appuser") or home.startswith("/home/adminuser")
+
+
+def is_crash_like_error(message: str) -> bool:
+    lowered = message.lower()
+    markers = (
+        "page crashed",
+        "target crashed",
+        "target closed",
+        "has been closed",
+        "browser has been closed",
+        "connection closed",
+        "session closed",
+    )
+    return any(marker in lowered for marker in markers)
 
 
 def resolve_supported_devices(playwright: Playwright, devices: list[str]) -> list[str]:
@@ -86,53 +112,97 @@ async def check_url(
     url: str,
 ) -> CheckResult:
     device = playwright.devices[device_name]
-    browser = None
-    context = None
+    managed_runtime = running_in_managed_runtime()
+    max_attempts = 2 if managed_runtime and browser_name == "chromium" else 1
 
-    start = perf_counter()
-    try:
-        launch_kwargs = browser_launch_kwargs(browser_name, headless=True)
-        browser = await browser_type.launch(**launch_kwargs)
-        context = await browser.new_context(**device)
-        page = await context.new_page()
-        response = await page.goto(url, wait_until="domcontentloaded", timeout=45000)
-        elapsed_ms = int((perf_counter() - start) * 1000)
-        status = response.status if response else None
-        ok = bool(status and 200 <= status < 400)
-        result = CheckResult(
-            target=target_name,
-            browser=browser_name,
-            device=device_name,
-            url=url,
-            status=status,
-            elapsed_ms=elapsed_ms,
-            ok=ok,
-            error=None if ok else f"Unexpected status: {status}",
-        )
-    except Error as exc:
-        elapsed_ms = int((perf_counter() - start) * 1000)
-        result = CheckResult(
-            target=target_name,
-            browser=browser_name,
-            device=device_name,
-            url=url,
-            status=None,
-            elapsed_ms=elapsed_ms,
-            ok=False,
-            error=str(exc),
-        )
-    finally:
-        if context is not None:
-            try:
-                await context.close()
-            except Error:
-                pass
-        if browser is not None:
-            try:
-                await browser.close()
-            except Error:
-                pass
-    return result
+    for attempt in range(1, max_attempts + 1):
+        browser = None
+        context = None
+        start = perf_counter()
+        try:
+            launch_kwargs = browser_launch_kwargs(browser_name, headless=True)
+            browser = await browser_type.launch(**launch_kwargs)
+
+            context_kwargs = dict(device)
+            if managed_runtime and browser_name == "chromium":
+                context_kwargs.setdefault("viewport", {"width": 1366, "height": 768})
+                context_kwargs.setdefault("device_scale_factor", 1)
+                context_kwargs["reduced_motion"] = "reduce"
+                context_kwargs["service_workers"] = "block"
+
+            context = await browser.new_context(**context_kwargs)
+
+            if managed_runtime and browser_name == "chromium":
+
+                async def _route_handler(route) -> None:
+                    try:
+                        if route.request.resource_type in {"image", "media", "font"}:
+                            await route.abort()
+                        else:
+                            await route.continue_()
+                    except Exception:
+                        try:
+                            await route.continue_()
+                        except Exception:
+                            pass
+
+                await context.route("**/*", _route_handler)
+
+            page = await context.new_page()
+            response = await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            elapsed_ms = int((perf_counter() - start) * 1000)
+            status = response.status if response else None
+            ok = bool(status and 200 <= status < 400)
+            return CheckResult(
+                target=target_name,
+                browser=browser_name,
+                device=device_name,
+                url=url,
+                status=status,
+                elapsed_ms=elapsed_ms,
+                ok=ok,
+                error=None if ok else f"Unexpected status: {status}",
+            )
+        except Error as exc:
+            message = str(exc)
+            if attempt < max_attempts and is_crash_like_error(message):
+                await asyncio.sleep(1.0 + attempt * 1.25)
+                continue
+
+            elapsed_ms = int((perf_counter() - start) * 1000)
+            return CheckResult(
+                target=target_name,
+                browser=browser_name,
+                device=device_name,
+                url=url,
+                status=None,
+                elapsed_ms=elapsed_ms,
+                ok=False,
+                error=message,
+            )
+        finally:
+            if context is not None:
+                try:
+                    await context.close()
+                except Error:
+                    pass
+            if browser is not None:
+                try:
+                    await browser.close()
+                except Error:
+                    pass
+
+    return CheckResult(
+        target=target_name,
+        browser=browser_name,
+        device=device_name,
+        url=url,
+        status=None,
+        elapsed_ms=0,
+        ok=False,
+        error="Unknown browser matrix failure",
+    )
+
 
 
 async def run_checks(args: argparse.Namespace) -> list[CheckResult]:
